@@ -1,11 +1,14 @@
 import sys
+import json  # <-- Add this import
 from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QLineEdit, QTextEdit
 from tools.apps import launch_application
-from tools.system import get_system_stats  # <-- New import
+from tools.system import get_system_stats
+from tools.ai_engine import query_jarvis_core
 
 class JarvisUI(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.memory = []
         self.init_ui()
 
     def init_ui(self):
@@ -23,7 +26,7 @@ class JarvisUI(QMainWindow):
         
         self.input_line = QLineEdit()
         self.input_line.setStyleSheet("background-color: #313244; color: #cdd6f4; font-size: 14px; padding: 5px;")
-        self.input_line.setPlaceholderText("Type a command (e.g., 'open firefox', 'check system')...")
+        self.input_line.setPlaceholderText("Ask JARVIS anything or issue a command...")
         self.input_line.returnPressed.connect(self.handle_command)
         layout.addWidget(self.input_line)
         
@@ -37,26 +40,50 @@ class JarvisUI(QMainWindow):
         
         self.output_area.append(f"\n> {query}")
         self.input_line.clear()
+        self.output_area.append("JARVIS: Processing token sequence...")
+        QApplication.processEvents()
         
-        normalized_query = query.lower()
+        # 1. Ask the AI
+        ai_blueprint = query_jarvis_core(query, self.memory)
         
-        # Tool 1: App Launcher
-        if normalized_query.startswith("open "):
-            target_app = normalized_query.replace("open ", "").strip()
-            self.output_area.append("JARVIS: Executing system call...")
-            result = launch_application(target_app)
+        # --- DEFENSIVE AUTOCORRECTION LAYER ---
+        # If the AI hallucinates and forgets the "tool" key, we fix it automatically
+        if "tool" not in ai_blueprint:
+            if "chat" in ai_blueprint:
+                ai_blueprint = {"tool": "chat", "response": ai_blueprint["chat"]}
+            elif "response" in ai_blueprint:
+                ai_blueprint = {"tool": "chat", "response": ai_blueprint["response"]}
+        # --------------------------------------
+        
+        tool_choice = ai_blueprint.get("tool")
+        
+        # 2. Save memory ensuring we store the RAW JSON string, keeping the pattern strict
+        self.memory.append({"role": "user", "content": query})
+        self.memory.append({"role": "assistant", "content": json.dumps(ai_blueprint)})
+        
+        # 3. Execute
+        if tool_choice == "open_app":
+            target_binary = ai_blueprint.get("app_name", "")
+            app_args = ai_blueprint.get("arguments", None)
+            
+            self.output_area.append(f"JARVIS: [Intent Mode] Target: '{target_binary}'")
+            result = launch_application(target_binary, app_args)
             self.output_area.append(f"JARVIS: {result}")
             
-        # Tool 2: System Monitor
-        elif normalized_query in ["check system", "system info", "vitals"]:
-            self.output_area.append("JARVIS: Scanning system vitals...")
-            # Use QApplication.processEvents() to update UI before the 1-second CPU check blocks it
-            QApplication.processEvents() 
+        elif tool_choice == "check_system":
+            self.output_area.append("JARVIS: [Intent Mode] Fetching kernel diagnostics...")
             result = get_system_stats()
             self.output_area.append(f"JARVIS:\n{result}")
             
+        elif tool_choice == "chat":
+            conversational_reply = ai_blueprint.get("response", "Internal routing anomaly encountered.")
+            self.output_area.append(f"JARVIS: {conversational_reply}")
+            
         else:
-            self.output_area.append("JARVIS: Unrecognized command. Try 'open firefox' or 'check system'.")
+            self.output_area.append(f"JARVIS: Routing matrix error. Raw AI output: {ai_blueprint}")
+            
+        if len(self.memory) > 10:
+            self.memory = self.memory[-10:]
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
